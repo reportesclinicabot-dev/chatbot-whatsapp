@@ -12,7 +12,6 @@ const userState = {};
  * Envía un mensaje de emergencia con el número de contacto y finaliza la conversación.
  */
 async function executeEmergencyCall(sock, from) {
-    // Guardar la emergencia en Supabase
     const ahora = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Caracas" }));
     const fechaISO = ahora.toISOString().split('T')[0];
     const horaParaDB = ahora.toTimeString().slice(0, 8);
@@ -21,21 +20,16 @@ async function executeEmergencyCall(sock, from) {
         tipo_solicitud: 'emergencia',
         fecha_solicitud: fechaISO,
         hora_solicitud: horaParaDB,
-        numero_turno: 'EMERGENCIA' // Opcional, para identificar
+        numero_turno: 'EMERGENCIA'
     });
 
     await sock.sendMessage(from, { text: "Detecté una emergencia. Por favor, comunícate directamente al siguiente número:\n*0265-8053063*" });
 }
 
 // =================================================================================
-// NUEVA LÓGICA DE BÚSQUEDA DE FECHAS
+// LÓGICA DE BÚSQUEDA DE FECHAS
 // =================================================================================
 
-/**
- * Convierte un string de día de la semana a un número (Domingo=0, Lunes=1, etc.).
- * @param {string} dayString - El nombre del día (ej. "Lunes").
- * @returns {number|null} El número del día o null si no es válido.
- */
 function getDayOfWeekAsNumber(dayString) {
     if (!dayString) return null;
     const days = {
@@ -44,79 +38,57 @@ function getDayOfWeekAsNumber(dayString) {
     return days[dayString.toLowerCase()] ?? null;
 }
 
-/**
- * Determina la fecha inicial para la búsqueda (hoy si es día hábil y antes de las 2 PM, si no, el próximo día hábil).
- * @returns {Date} La fecha inicial para la búsqueda.
- */
 function getInitialSearchDate() {
     const ahora = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Caracas" }));
-    let fechaBusqueda = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate()); // Normaliza a la medianoche
+    let fechaBusqueda = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate()); 
 
     const diaSemana = fechaBusqueda.getDay();
     const hora = ahora.getHours();
 
-    // Si es fin de semana, avanza al lunes
-    if (diaSemana === 6) { // Sábado
+    if (diaSemana === 6) { 
         fechaBusqueda.setDate(fechaBusqueda.getDate() + 2);
-    } else if (diaSemana === 0) { // Domingo
+    } else if (diaSemana === 0) { 
         fechaBusqueda.setDate(fechaBusqueda.getDate() + 1);
     }
-    // Si es un día de semana pero ya pasó el horario de atención (2 PM)
     else if (hora >= 14) {
         fechaBusqueda.setDate(fechaBusqueda.getDate() + 1);
-        // Si al avanzar cae en fin de semana, ajusta al lunes
         if (fechaBusqueda.getDay() === 6) fechaBusqueda.setDate(fechaBusqueda.getDate() + 2);
     }
 
     return fechaBusqueda;
 }
 
-/**
- * Busca la próxima fecha disponible para una cita, opcionalmente a partir de un día deseado.
- * @param {'consulta' | 'reembolso' | 'ecor'} tipo - El tipo de solicitud.
- * @param {string|null} diaDeseadoString - El día de la semana deseado (ej. "Miércoles").
- * @returns {Promise<Date|null>} La fecha encontrada o null si no hay cupos en los próximos 7 días.
- */
 async function findNextAvailableDate(tipo, diaDeseadoString = null) {
     let searchDate = getInitialSearchDate();
     const targetDay = getDayOfWeekAsNumber(diaDeseadoString);
 
     if (targetDay !== null) {
-        // Avanza la fecha hasta que coincida con el día de la semana deseado
         while (searchDate.getDay() !== targetDay) {
             searchDate.setDate(searchDate.getDate() + 1);
         }
     }
 
-    // Busca un cupo disponible en los próximos 7 días a partir de la fecha de búsqueda
     for (let i = 0; i < 7; i++) {
         const currentDay = searchDate.getDay();
-        // Solo busca en días hábiles (Lunes a Viernes)
         if (currentDay >= 1 && currentDay <= 5) {
             const tipoBusqueda = tipo === 'ecor' ? 'consulta' : tipo;
             const cupos = await getCuposDisponibles(tipoBusqueda, searchDate);
             if (cupos > 0) {
-                return searchDate; // ¡Encontramos un cupo!
+                return searchDate; 
             }
         }
-        // Si no hay cupo o es fin de semana, avanza al siguiente día
         searchDate.setDate(searchDate.getDate() + 1);
     }
-
-    return null; // No se encontraron cupos en la próxima semana
+    return null; 
 }
 
-/**
- * Función centralizada para manejar la lógica de agendamiento de citas y reembolsos.
- */
 async function handleSchedulingRequest(sock, from, tipo, args) {
-    userState[from] = { data: args }; // Guarda los datos del usuario
+    userState[from] = { data: args }; 
     const diaDeseado = args.dia_semana_deseado;
 
     const tipoParaCupos = args.tipo_consulta_detalle === 'Examen físico anual (ECOR)' ? 'ecor' : tipo;
 
     if (tipoParaCupos === 'ecor') {
-        // ECOR no tiene límite de cupos, se agenda para la próxima fecha posible
         let fechaCita = getInitialSearchDate();
         if (diaDeseado) {
             const targetDay = getDayOfWeekAsNumber(diaDeseado);
@@ -126,7 +98,6 @@ async function handleSchedulingRequest(sock, from, tipo, args) {
                 }
             }
         }
-        // Asegurarse que no caiga en fin de semana
         if (fechaCita.getDay() === 0) fechaCita.setDate(fechaCita.getDate() + 1);
         if (fechaCita.getDay() === 6) fechaCita.setDate(fechaCita.getDate() + 2);
 
@@ -135,11 +106,9 @@ async function handleSchedulingRequest(sock, from, tipo, args) {
         return true;
     }
 
-    // Para consultas y reembolsos, buscamos el próximo cupo disponible
     const fechaCita = await findNextAvailableDate(tipo, diaDeseado);
 
     if (fechaCita) {
-        // --- VERIFICACIÓN DE CITA EXISTENTE ---
         if (tipo === 'consulta' && args.cedula) {
             const tieneCita = await checkExistingAppointment(args.cedula, fechaCita);
             if (tieneCita) {
@@ -152,15 +121,14 @@ async function handleSchedulingRequest(sock, from, tipo, args) {
         const mensaje = await procesarCreacionSolicitud(from, tipo, fechaCita);
         await sock.sendMessage(from, { text: mensaje });
 
-        // --- NUEVO FLUJO POST-REGISTRO ---
         userState[from] = { step: 'esperando_confirmacion_final' };
-        return false; // Retornamos false para indicar que el flujo NO ha terminado completamente (aunque la tarea principal sí)
+        return false; 
     } else {
         const mensajeAviso = diaDeseado
             ? `Lo sentimos, no hay cupos disponibles para el ${diaDeseado} ni en los días siguientes. Por favor, intenta para otra fecha.`
             : "Lo sentimos, no hemos encontrado cupos disponibles en los próximos 7 días. Por favor, intenta de nuevo más tarde.";
         await sock.sendMessage(from, { text: mensajeAviso });
-        return true; // Finaliza el flujo
+        return true; 
     }
 }
 
@@ -172,14 +140,6 @@ async function executeAppointmentRequest(sock, from, args) {
     return await handleSchedulingRequest(sock, from, 'consulta', args);
 }
 
-
-// =================================================================================
-// FUNCIONES DE SOPORTE
-// =================================================================================
-
-/**
- * Lógica central para crear una solicitud en la base de datos y generar el mensaje de éxito.
- */
 async function procesarCreacionSolicitud(from, tipo, fecha) {
     const currentState = userState[from];
     if (!currentState || !currentState.data) return "Hubo un error al recuperar tus datos. Por favor, intenta de nuevo.";
@@ -196,7 +156,7 @@ async function procesarCreacionSolicitud(from, tipo, fecha) {
 
     const datosParaGuardar = { ...currentState.data };
     delete datosParaGuardar.fechaPropuesta;
-    delete datosParaGuardar.dia_semana_deseado; // Limpiamos el dato auxiliar
+    delete datosParaGuardar.dia_semana_deseado; 
 
     const solicitudData = {
         ...datosParaGuardar,
@@ -241,61 +201,67 @@ async function handleMenuResponse(sock, from, messageContent) {
 }
 
 // =================================================================================
-// HANDLER PRINCIPAL (Lógica de Comandos Corregida)
+// HANDLER PRINCIPAL (Lógica de Comandos y Remitente CORREGIDA)
 // =================================================================================
 async function handleMessage(sock, msg) {
+    // 1. Identificamos el CHAT (dónde responder)
     const from = jidNormalizedUser(msg.key.remoteJid);
-    const senderNumber = from.split('@')[0]; // Número limpio de quien escribe
-    const envAdminNumber = (process.env.REPORT_WHATSAPP_NUMBER || '').replace(/[^0-9]/g, ''); // Número limpio del admin
+    
+    // 2. Identificamos el USUARIO (quién escribe realmente)
+    // Esto arregla el bug donde sale un número "loco" si es un grupo o dispositivo vinculado
+    const senderJid = msg.key.participant || msg.key.remoteJid; 
+    const senderNormalized = jidNormalizedUser(senderJid);
+    const senderNumber = senderNormalized.split('@')[0]; // ESTE es el número real que escribe
 
-    // --- DEBUGGING VISIBLE EN CONSOLA ---
-    // Esto te dirá por qué falla si el número no coincide
-    console.log(`[DEBUG] Mensaje de: ${senderNumber} | Admin esperado: ${envAdminNumber} | Texto: ${msg.message?.conversation || 'multimedia'}`);
+    // 3. Número del admin limpio desde el .env
+    const envAdminNumber = (process.env.REPORT_WHATSAPP_NUMBER || '').replace(/[^0-9]/g, '');
+
+    console.log(`[DEBUG] Chat: ${from.split('@')[0]} | Sender Real: ${senderNumber} | Admin Config: ${envAdminNumber}`);
 
     const isAudio = msg.message?.audioMessage;
     let originalText = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
 
     // -------------------------------------------------------------
-    // BLOQUE DE COMANDOS DE ADMINISTRADOR (Prioridad Alta)
+    // BLOQUE DE COMANDOS DE ADMINISTRADOR
     // -------------------------------------------------------------
     if (originalText.startsWith('/')) {
         const command = originalText.toLowerCase().split(' ')[0];
+        
+        // Comparamos el número REAL del remitente con el admin
         const isAdmin = senderNumber === envAdminNumber;
 
         // 1. REPORTE MENSUAL: /reporte-mensual (opcional: YYYY-MM)
         if (command === '/reporte-mensual') {
             if (!isAdmin) {
-                console.log(`[SEGURIDAD] Usuario ${senderNumber} intentó usar comando admin.`);
+                console.log(`[SEGURIDAD] Bloqueado. ${senderNumber} no es el admin.`);
                 return;
             }
             const parts = originalText.split(' ');
-            let mesString = new Date().toISOString().slice(0, 7); // Default: Mes actual
+            let mesString = new Date().toISOString().slice(0, 7); 
             if (parts.length > 1 && /^\d{4}-\d{2}$/.test(parts[1])) {
                 mesString = parts[1];
             }
             
-            await sock.sendMessage(from, { text: `📊 Recibido. Generando reporte MENSUAL (${mesString})... por favor espera.` });
-            console.log(`[COMANDO] Generando reporte mensual para ${mesString}`);
+            await sock.sendMessage(from, { text: `📊 Generando reporte MENSUAL (${mesString})...` });
             await generateAndSendMonthlyReport(sock, from, mesString);
-            return; // Detenemos ejecución aquí
+            return; 
         }
 
         // 2. REPORTE DIARIO: /reporte (opcional: YYYY-MM-DD)
         if (command === '/reporte') {
             if (!isAdmin) {
-                console.log(`[SEGURIDAD] Usuario ${senderNumber} intentó usar comando admin.`);
+                console.log(`[SEGURIDAD] Bloqueado. ${senderNumber} no es el admin.`);
                 return;
             }
             const parts = originalText.split(' ');
-            let fechaString = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Caracas' }); // Default: Hoy
+            let fechaString = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Caracas' }); 
             if (parts.length > 1 && /^\d{4}-\d{2}-\d{2}$/.test(parts[1])) {
                 fechaString = parts[1];
             }
 
-            await sock.sendMessage(from, { text: `📈 Recibido. Generando reporte DIARIO (${fechaString})... por favor espera.` });
-            console.log(`[COMANDO] Generando reporte diario para ${fechaString}`);
+            await sock.sendMessage(from, { text: `📈 Generando reporte DIARIO (${fechaString})...` });
             await generateAndSendReports(sock, from, fechaString);
-            return; // Detenemos ejecución aquí
+            return; 
         }
     }
     // -------------------------------------------------------------
@@ -318,7 +284,6 @@ async function handleMessage(sock, msg) {
             delete userState[from];
             return;
         } else {
-            // Si dice otra cosa, dejamos que la IA continúe
             delete userState[from];
         }
     }
@@ -331,7 +296,7 @@ async function handleMessage(sock, msg) {
     // --- PROCESAMIENTO DE AUDIO ---
     if (isAudio) {
         try {
-            console.log(`[AUDIO] Recibido de ${from}. Procesando...`);
+            console.log(`[AUDIO] Recibido de ${senderNumber}. Procesando...`);
             await sock.sendMessage(from, { text: "Procesando tu nota de voz, un momento..." });
 
             const buffer = await downloadMediaMessage(msg, 'buffer', {});
@@ -365,7 +330,6 @@ async function handleMessage(sock, msg) {
         const aiResponse = await processConversationWithAI(userState[from].history);
 
         if (!aiResponse) {
-            console.log("IA no disponible. Usando menú de respaldo.");
             userState[from].history.pop();
             await startMenuFlow(sock, from, "Lo siento, el asistente inteligente no responde.");
             return;
