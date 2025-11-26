@@ -8,9 +8,18 @@ require('dotenv').config();
 
 const userState = {};
 
-/**
- * Envía un mensaje de emergencia con el número de contacto y finaliza la conversación.
- */
+// Almacenamiento temporal de admins logueados en memoria (se borra si reinicias el bot)
+// Si necesitas que persista tras reiniciar, avísame para agregar guardar en archivo.
+const activeAdmins = new Set();
+
+// Agregamos el número del .env a la lista de activos al iniciar (si existe)
+const envNumber = (process.env.REPORT_WHATSAPP_NUMBER || '').replace(/[^0-9]/g, '');
+if (envNumber) activeAdmins.add(envNumber);
+
+// =================================================================================
+// FUNCIONES AUXILIARES
+// =================================================================================
+
 async function executeEmergencyCall(sock, from) {
     const ahora = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Caracas" }));
     const fechaISO = ahora.toISOString().split('T')[0];
@@ -25,10 +34,6 @@ async function executeEmergencyCall(sock, from) {
 
     await sock.sendMessage(from, { text: "Detecté una emergencia. Por favor, comunícate directamente al siguiente número:\n*0265-8053063*" });
 }
-
-// =================================================================================
-// LÓGICA DE BÚSQUEDA DE FECHAS
-// =================================================================================
 
 function getDayOfWeekAsNumber(dayString) {
     if (!dayString) return null;
@@ -201,63 +206,82 @@ async function handleMenuResponse(sock, from, messageContent) {
 }
 
 // =================================================================================
-// HANDLER PRINCIPAL (Lógica de Comandos y Remitente CORREGIDA)
+// HANDLER PRINCIPAL (Con Sistema de Login)
 // =================================================================================
 async function handleMessage(sock, msg) {
-    // 1. Identificamos el CHAT (dónde responder)
     const from = jidNormalizedUser(msg.key.remoteJid);
     
-    // 2. Identificamos el USUARIO (quién escribe realmente)
-    // Esto arregla el bug donde sale un número "loco" si es un grupo o dispositivo vinculado
+    // Identificamos quién escribe, normalizando siempre para evitar errores
     const senderJid = msg.key.participant || msg.key.remoteJid; 
     const senderNormalized = jidNormalizedUser(senderJid);
-    const senderNumber = senderNormalized.split('@')[0]; // ESTE es el número real que escribe
+    const senderNumber = senderNormalized.split('@')[0]; 
 
-    // 3. Número del admin limpio desde el .env
-    const envAdminNumber = (process.env.REPORT_WHATSAPP_NUMBER || '').replace(/[^0-9]/g, '');
-
-    console.log(`[DEBUG] Chat: ${from.split('@')[0]} | Sender Real: ${senderNumber} | Admin Config: ${envAdminNumber}`);
+    // Debugging claro para ver quién eres
+    console.log(`[DEBUG] Sender ID: ${senderNumber} | ¿Es Admin?: ${activeAdmins.has(senderNumber)}`);
 
     const isAudio = msg.message?.audioMessage;
     let originalText = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
 
     // -------------------------------------------------------------
-    // BLOQUE DE COMANDOS DE ADMINISTRADOR
+    // BLOQUE DE AUTENTICACIÓN Y COMANDOS ADMIN
     // -------------------------------------------------------------
     if (originalText.startsWith('/')) {
-        const command = originalText.toLowerCase().split(' ')[0];
+        const parts = originalText.split(' ');
+        const command = parts[0].toLowerCase();
         
-        // Comparamos el número REAL del remitente con el admin
-        const isAdmin = senderNumber === envAdminNumber;
+        // 1. SISTEMA DE LOGIN: /login [contraseña]
+        // Esto permite autorizar CUALQUIER número (58... o 93...) sin tocar código
+        if (command === '/login') {
+            const passwordProvided = parts[1];
+            const correctPassword = process.env.ADMIN_PASSWORD;
 
-        // 1. REPORTE MENSUAL: /reporte-mensual (opcional: YYYY-MM)
+            if (!correctPassword) {
+                console.log("[ERROR] No se ha configurado ADMIN_PASSWORD en el .env");
+                return; 
+            }
+
+            if (passwordProvided === correctPassword) {
+                activeAdmins.add(senderNumber); // Agregamos el número actual a la lista blanca
+                console.log(`[AUTH] Nuevo admin logueado: ${senderNumber}`);
+                await sock.sendMessage(from, { text: "✅ Contraseña correcta. Ahora eres administrador en esta sesión." });
+            } else {
+                console.log(`[AUTH] Intento fallido de login desde ${senderNumber}`);
+                await sock.sendMessage(from, { text: "⛔ Contraseña incorrecta." });
+            }
+            return; // Cortamos el flujo
+        }
+
+        // Verificación de Permisos para el resto de comandos
+        const isAdmin = activeAdmins.has(senderNumber);
+
+        // 2. COMANDO: /mi-id (Para ver qué número técnico te asignó WhatsApp)
+        if (command === '/mi-id') {
+            await sock.sendMessage(from, { text: `Tu ID técnico es: \n${senderNumber}\n\nUsa '/login [contraseña]' para autorizarte.` });
+            return;
+        }
+
+        // 3. REPORTE MENSUAL
         if (command === '/reporte-mensual') {
             if (!isAdmin) {
-                console.log(`[SEGURIDAD] Bloqueado. ${senderNumber} no es el admin.`);
+                await sock.sendMessage(from, { text: "🔒 No tienes permisos. Escribe '/login [contraseña]' primero." });
                 return;
             }
-            const parts = originalText.split(' ');
             let mesString = new Date().toISOString().slice(0, 7); 
-            if (parts.length > 1 && /^\d{4}-\d{2}$/.test(parts[1])) {
-                mesString = parts[1];
-            }
+            if (parts.length > 1 && /^\d{4}-\d{2}$/.test(parts[1])) mesString = parts[1];
             
             await sock.sendMessage(from, { text: `📊 Generando reporte MENSUAL (${mesString})...` });
             await generateAndSendMonthlyReport(sock, from, mesString);
             return; 
         }
 
-        // 2. REPORTE DIARIO: /reporte (opcional: YYYY-MM-DD)
+        // 4. REPORTE DIARIO
         if (command === '/reporte') {
             if (!isAdmin) {
-                console.log(`[SEGURIDAD] Bloqueado. ${senderNumber} no es el admin.`);
+                await sock.sendMessage(from, { text: "🔒 No tienes permisos. Escribe '/login [contraseña]' primero." });
                 return;
             }
-            const parts = originalText.split(' ');
             let fechaString = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Caracas' }); 
-            if (parts.length > 1 && /^\d{4}-\d{2}-\d{2}$/.test(parts[1])) {
-                fechaString = parts[1];
-            }
+            if (parts.length > 1 && /^\d{4}-\d{2}-\d{2}$/.test(parts[1])) fechaString = parts[1];
 
             await sock.sendMessage(from, { text: `📈 Generando reporte DIARIO (${fechaString})...` });
             await generateAndSendReports(sock, from, fechaString);
@@ -268,6 +292,8 @@ async function handleMessage(sock, msg) {
     // FIN BLOQUE COMANDOS
     // -------------------------------------------------------------
 
+    // ... Resto del flujo normal (Menú, IA, Audio) ...
+
     if (originalText.toLowerCase() === 'menu') {
         delete userState[from];
         await startMenuFlow(sock, from, "Ok, empecemos de nuevo.");
@@ -276,7 +302,6 @@ async function handleMessage(sock, msg) {
 
     const currentState = userState[from];
 
-    // --- MANEJADOR DE CONFIRMACIÓN FINAL ---
     if (currentState && currentState.step === 'esperando_confirmacion_final') {
         const respuesta = originalText.toLowerCase();
         if (respuesta.includes('no') || respuesta.includes('gracias') || respuesta.includes('listo')) {
@@ -293,7 +318,6 @@ async function handleMessage(sock, msg) {
         return;
     }
 
-    // --- PROCESAMIENTO DE AUDIO ---
     if (isAudio) {
         try {
             console.log(`[AUDIO] Recibido de ${senderNumber}. Procesando...`);
@@ -320,7 +344,6 @@ async function handleMessage(sock, msg) {
 
     if (!originalText) return;
 
-    // --- INTERACCIÓN CON IA ---
     if (!userState[from] || !userState[from].history) {
         userState[from] = { history: [] };
     }
