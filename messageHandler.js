@@ -113,13 +113,6 @@ async function handleSchedulingRequest(sock, from, tipo, args) {
     userState[from] = { data: args }; // Guarda los datos del usuario
     const diaDeseado = args.dia_semana_deseado;
 
-    // --- NUEVA RESTRICCIÓN: Verificar si ya tiene cita ese día ---
-    if (tipo === 'consulta' && args.cedula) {
-        // Nota: Necesitamos saber la fecha *antes* de verificar. 
-        // Pero la fecha depende de la búsqueda. 
-        // Primero buscamos la fecha tentativa, luego verificamos.
-    }
-
     const tipoParaCupos = args.tipo_consulta_detalle === 'Examen físico anual (ECOR)' ? 'ecor' : tipo;
 
     if (tipoParaCupos === 'ecor') {
@@ -160,7 +153,6 @@ async function handleSchedulingRequest(sock, from, tipo, args) {
         await sock.sendMessage(from, { text: mensaje });
 
         // --- NUEVO FLUJO POST-REGISTRO ---
-        // No borramos el estado inmediatamente, lo cambiamos a 'esperando_confirmacion_final'
         userState[from] = { step: 'esperando_confirmacion_final' };
         return false; // Retornamos false para indicar que el flujo NO ha terminado completamente (aunque la tarea principal sí)
     } else {
@@ -182,7 +174,7 @@ async function executeAppointmentRequest(sock, from, args) {
 
 
 // =================================================================================
-// FUNCIONES DE SOPORTE (La mayoría sin cambios)
+// FUNCIONES DE SOPORTE
 // =================================================================================
 
 /**
@@ -222,7 +214,6 @@ async function procesarCreacionSolicitud(from, tipo, fecha) {
     return "Hubo un error al registrar tu solicitud en la base de datos.";
 }
 
-// Las funciones de menú de respaldo y el manejador principal no necesitan cambios
 async function startMenuFlow(sock, from, prependMessage = null) {
     console.log(`Activando flujo de menú de respaldo de texto para ${from}`);
     userState[from] = { step: 'menu_principal_respuesta' };
@@ -249,36 +240,67 @@ async function handleMenuResponse(sock, from, messageContent) {
     }
 }
 
+// =================================================================================
+// HANDLER PRINCIPAL (Lógica de Comandos Corregida)
+// =================================================================================
 async function handleMessage(sock, msg) {
     const from = jidNormalizedUser(msg.key.remoteJid);
-    console.log(`[DEBUG] Mensaje recibido de: ${msg.key.remoteJid} -> Normalizado a: ${from}`);
+    const senderNumber = from.split('@')[0]; // Número limpio de quien escribe
+    const envAdminNumber = (process.env.REPORT_WHATSAPP_NUMBER || '').replace(/[^0-9]/g, ''); // Número limpio del admin
+
+    // --- DEBUGGING VISIBLE EN CONSOLA ---
+    // Esto te dirá por qué falla si el número no coincide
+    console.log(`[DEBUG] Mensaje de: ${senderNumber} | Admin esperado: ${envAdminNumber} | Texto: ${msg.message?.conversation || 'multimedia'}`);
+
     const isAudio = msg.message?.audioMessage;
     let originalText = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
 
-    const adminNumber = `${process.env.REPORT_WHATSAPP_NUMBER}@s.whatsapp.net`;
+    // -------------------------------------------------------------
+    // BLOQUE DE COMANDOS DE ADMINISTRADOR (Prioridad Alta)
+    // -------------------------------------------------------------
+    if (originalText.startsWith('/')) {
+        const command = originalText.toLowerCase().split(' ')[0];
+        const isAdmin = senderNumber === envAdminNumber;
 
-    if (originalText.toLowerCase().startsWith('/reporte-mensual') && from === adminNumber) {
-        const parts = originalText.split(' ');
-        let mesString = new Date().toISOString().slice(0, 7); // YYYY-MM actual por defecto
-        if (parts.length > 1 && /^\d{4}-\d{2}$/.test(parts[1])) {
-            mesString = parts[1];
+        // 1. REPORTE MENSUAL: /reporte-mensual (opcional: YYYY-MM)
+        if (command === '/reporte-mensual') {
+            if (!isAdmin) {
+                console.log(`[SEGURIDAD] Usuario ${senderNumber} intentó usar comando admin.`);
+                return;
+            }
+            const parts = originalText.split(' ');
+            let mesString = new Date().toISOString().slice(0, 7); // Default: Mes actual
+            if (parts.length > 1 && /^\d{4}-\d{2}$/.test(parts[1])) {
+                mesString = parts[1];
+            }
+            
+            await sock.sendMessage(from, { text: `📊 Recibido. Generando reporte MENSUAL (${mesString})... por favor espera.` });
+            console.log(`[COMANDO] Generando reporte mensual para ${mesString}`);
+            await generateAndSendMonthlyReport(sock, from, mesString);
+            return; // Detenemos ejecución aquí
         }
-        await sock.sendMessage(from, { text: `Recibido. Generando el reporte MENSUAL para ${mesString}...` });
-        await generateAndSendMonthlyReport(sock, adminNumber, mesString);
-        return;
-    }
 
-    if (originalText.toLowerCase().startsWith('/reporte') && from === adminNumber) {
-        const parts = originalText.split(' ');
-        let fechaString = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Caracas' });
-        if (parts.length > 1 && /^\d{4}-\d{2}-\d{2}$/.test(parts[1])) {
-            fechaString = parts[1];
+        // 2. REPORTE DIARIO: /reporte (opcional: YYYY-MM-DD)
+        if (command === '/reporte') {
+            if (!isAdmin) {
+                console.log(`[SEGURIDAD] Usuario ${senderNumber} intentó usar comando admin.`);
+                return;
+            }
+            const parts = originalText.split(' ');
+            let fechaString = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Caracas' }); // Default: Hoy
+            if (parts.length > 1 && /^\d{4}-\d{2}-\d{2}$/.test(parts[1])) {
+                fechaString = parts[1];
+            }
+
+            await sock.sendMessage(from, { text: `📈 Recibido. Generando reporte DIARIO (${fechaString})... por favor espera.` });
+            console.log(`[COMANDO] Generando reporte diario para ${fechaString}`);
+            await generateAndSendReports(sock, from, fechaString);
+            return; // Detenemos ejecución aquí
         }
-        const fechaDisplay = new Date(fechaString + 'T12:00:00Z');
-        await sock.sendMessage(from, { text: `Recibido. Generando el reporte para el día ${fechaDisplay.toLocaleDateString('es-VE')}...` });
-        await generateAndSendReports(sock, adminNumber, fechaString);
-        return;
     }
+    // -------------------------------------------------------------
+    // FIN BLOQUE COMANDOS
+    // -------------------------------------------------------------
 
     if (originalText.toLowerCase() === 'menu') {
         delete userState[from];
@@ -286,10 +308,9 @@ async function handleMessage(sock, msg) {
         return;
     }
 
-    // La lógica de confirmación para el día siguiente ya no es necesaria con el nuevo sistema.
     const currentState = userState[from];
 
-    // --- NUEVO MANEJADOR DE CONFIRMACIÓN FINAL ---
+    // --- MANEJADOR DE CONFIRMACIÓN FINAL ---
     if (currentState && currentState.step === 'esperando_confirmacion_final') {
         const respuesta = originalText.toLowerCase();
         if (respuesta.includes('no') || respuesta.includes('gracias') || respuesta.includes('listo')) {
@@ -297,10 +318,8 @@ async function handleMessage(sock, msg) {
             delete userState[from];
             return;
         } else {
-            // Si dice otra cosa (ej: "tengo una emergencia"), borramos el estado "finalizado"
-            // y dejamos que el flujo continúe hacia la IA para que ella interprete el mensaje.
+            // Si dice otra cosa, dejamos que la IA continúe
             delete userState[from];
-            // NO hacemos return aquí, para que caiga en la lógica de IA de abajo
         }
     }
 
@@ -309,37 +328,34 @@ async function handleMessage(sock, msg) {
         return;
     }
 
+    // --- PROCESAMIENTO DE AUDIO ---
     if (isAudio) {
         try {
-            console.log(`[DEBUG] Recibida nota de voz de ${from}. Iniciando descarga...`);
+            console.log(`[AUDIO] Recibido de ${from}. Procesando...`);
             await sock.sendMessage(from, { text: "Procesando tu nota de voz, un momento..." });
 
             const buffer = await downloadMediaMessage(msg, 'buffer', {});
-            console.log(`[DEBUG] Audio descargado. Tamaño del buffer: ${buffer ? buffer.length : 'NULO'} bytes`);
-
             if (!buffer || buffer.length === 0) {
-                console.error("[ERROR] El buffer de audio está vacío o es nulo.");
-                await sock.sendMessage(from, { text: "Hubo un error al descargar el audio. Por favor intenta de nuevo." });
+                await sock.sendMessage(from, { text: "Error al descargar audio." });
                 return;
             }
 
             originalText = await transcribeAudio(buffer);
-            console.log(`[DEBUG] Resultado de transcripción: "${originalText}"`);
-
             if (!originalText) {
-                console.warn("[WARN] La transcripción retornó null o vacío.");
-                await sock.sendMessage(from, { text: "Lo siento, no pude procesar tu nota de voz. Por favor, ¿podrías escribir tu solicitud?" });
+                await sock.sendMessage(from, { text: "No pude entender el audio. ¿Podrías escribirlo?" });
                 return;
             }
-            console.log(`Audio transcrito como: "${originalText}"`);
+            console.log(`[TRANSCRIPCIÓN] "${originalText}"`);
         } catch (error) {
-            console.error("Error crítico durante el procesamiento de audio:", error);
-            await sock.sendMessage(from, { text: "Hubo un problema inesperado con tu nota de voz. Por favor, intenta de nuevo." });
+            console.error("Error en audio:", error);
+            await sock.sendMessage(from, { text: "Error procesando el audio." });
             return;
         }
     }
 
     if (!originalText) return;
+
+    // --- INTERACCIÓN CON IA ---
     if (!userState[from] || !userState[from].history) {
         userState[from] = { history: [] };
     }
@@ -349,9 +365,9 @@ async function handleMessage(sock, msg) {
         const aiResponse = await processConversationWithAI(userState[from].history);
 
         if (!aiResponse) {
-            console.log("FALLO TOTAL DE LA IA. Activando modo menú de respaldo.");
+            console.log("IA no disponible. Usando menú de respaldo.");
             userState[from].history.pop();
-            await startMenuFlow(sock, from, "Lo siento, nuestro asistente inteligente no está disponible en este momento.");
+            await startMenuFlow(sock, from, "Lo siento, el asistente inteligente no responde.");
             return;
         }
 
@@ -362,28 +378,25 @@ async function handleMessage(sock, msg) {
             let taskCompleted = true;
             const toolName = aiResponse.call.name;
             const toolArgs = JSON.parse(aiResponse.call.arguments || '{}');
-            console.log(`[+] Ejecutando herramienta: ${toolName}`, toolArgs);
+            
+            console.log(`[TOOL] Ejecutando: ${toolName}`, toolArgs);
+            
             if (toolName === 'informar_emergencia') await executeEmergencyCall(sock, from);
             else if (toolName === 'solicitar_reembolso') taskCompleted = await executeReimbursementRequest(sock, from, toolArgs);
             else if (toolName === 'agendar_solicitud') taskCompleted = await executeAppointmentRequest(sock, from, toolArgs);
             else throw new Error(`Herramienta desconocida: ${toolName}`);
 
-            if (taskCompleted) {
-                // Solo borramos si taskCompleted es true Y no estamos en el paso de confirmación final
-                if (userState[from]?.step !== 'esperando_confirmacion_final') {
-                    delete userState[from];
-                }
+            if (taskCompleted && userState[from]?.step !== 'esperando_confirmacion_final') {
+                delete userState[from];
             }
         } else {
             userState[from].history.pop();
-            throw new Error(`Respuesta no reconocida de la IA: ${JSON.stringify(aiResponse)}`);
+            throw new Error(`Respuesta IA desconocida`);
         }
     } catch (error) {
-        console.error("Error en flujo de IA. Activando modo menú de respaldo:", error);
-        if (userState[from] && userState[from].history) {
-            userState[from].history.pop();
-        }
-        await startMenuFlow(sock, from, "Hubo un problema con el asistente.");
+        console.error("Error IA:", error);
+        if (userState[from]) userState[from].history.pop();
+        await startMenuFlow(sock, from, "Hubo un problema técnico.");
     }
 }
 
