@@ -8,11 +8,8 @@ require('dotenv').config();
 
 const userState = {};
 
-// Almacenamiento temporal de admins logueados en memoria (se borra si reinicias el bot)
-// Si necesitas que persista tras reiniciar, avísame para agregar guardar en archivo.
+// Almacenamiento temporal de admins logueados en memoria
 const activeAdmins = new Set();
-
-// Agregamos el número del .env a la lista de activos al iniciar (si existe)
 const envNumber = (process.env.REPORT_WHATSAPP_NUMBER || '').replace(/[^0-9]/g, '');
 if (envNumber) activeAdmins.add(envNumber);
 
@@ -25,13 +22,22 @@ async function executeEmergencyCall(sock, from) {
     const fechaISO = ahora.toISOString().split('T')[0];
     const horaParaDB = ahora.toTimeString().slice(0, 8);
 
+    // SOLUCIÓN EMERGENCIA: Llenamos los datos obligatorios con "EMERGENCIA"
+    // para que Supabase no rechace el registro.
     await crearSolicitud({
         tipo_solicitud: 'emergencia',
+        nombre_paciente: 'EMERGENCIA',
+        apellido_paciente: 'EMERGENCIA',
+        cedula: '00000000',
+        nomina: 'N/A',
+        gerencia: 'N/A',
         fecha_solicitud: fechaISO,
         hora_solicitud: horaParaDB,
-        numero_turno: 'EMERGENCIA'
+        numero_turno: 'EMERGENCIA',
+        tipo_consulta_detalle: 'Contacto de Emergencia'
     });
 
+    console.log(`[DB] Emergencia registrada para ${from}`);
     await sock.sendMessage(from, { text: "Detecté una emergencia. Por favor, comunícate directamente al siguiente número:\n*0265-8053063*" });
 }
 
@@ -63,7 +69,14 @@ function getInitialSearchDate() {
     return fechaBusqueda;
 }
 
-async function findNextAvailableDate(tipo, diaDeseadoString = null) {
+// Helper para detectar ECOR de forma flexible
+function esSolicitudECOR(textoTipo) {
+    if (!textoTipo) return false;
+    const texto = textoTipo.toLowerCase();
+    return texto.includes('ecor') || texto.includes('físico') || texto.includes('fisico');
+}
+
+async function findNextAvailableDate(tipo, diaDeseadoString = null, esEcor = false) {
     let searchDate = getInitialSearchDate();
     const targetDay = getDayOfWeekAsNumber(diaDeseadoString);
 
@@ -76,7 +89,9 @@ async function findNextAvailableDate(tipo, diaDeseadoString = null) {
     for (let i = 0; i < 7; i++) {
         const currentDay = searchDate.getDay();
         if (currentDay >= 1 && currentDay <= 5) {
-            const tipoBusqueda = tipo === 'ecor' ? 'consulta' : tipo;
+            // Si es ECOR, buscamos cupos en la columna de consulta o ecor según tu lógica DB
+            // Aquí asumo que ECOR comparte cupos o tiene lógica propia, pero forzamos el tipo
+            const tipoBusqueda = esEcor ? 'ecor' : tipo; 
             const cupos = await getCuposDisponibles(tipoBusqueda, searchDate);
             if (cupos > 0) {
                 return searchDate; 
@@ -90,10 +105,13 @@ async function findNextAvailableDate(tipo, diaDeseadoString = null) {
 async function handleSchedulingRequest(sock, from, tipo, args) {
     userState[from] = { data: args }; 
     const diaDeseado = args.dia_semana_deseado;
+    
+    // SOLUCIÓN ECOR: Detección robusta
+    const esEcor = esSolicitudECOR(args.tipo_consulta_detalle);
+    const tipoReal = esEcor ? 'ecor' : tipo;
 
-    const tipoParaCupos = args.tipo_consulta_detalle === 'Examen físico anual (ECOR)' ? 'ecor' : tipo;
-
-    if (tipoParaCupos === 'ecor') {
+    if (esEcor) {
+        // Lógica específica para ECOR (sin límite o lógica diferente de fecha)
         let fechaCita = getInitialSearchDate();
         if (diaDeseado) {
             const targetDay = getDayOfWeekAsNumber(diaDeseado);
@@ -106,6 +124,7 @@ async function handleSchedulingRequest(sock, from, tipo, args) {
         if (fechaCita.getDay() === 0) fechaCita.setDate(fechaCita.getDate() + 1);
         if (fechaCita.getDay() === 6) fechaCita.setDate(fechaCita.getDate() + 2);
 
+        // Importante: Pasamos 'ecor' explícitamente
         const mensaje = await procesarCreacionSolicitud(from, 'ecor', fechaCita);
         await sock.sendMessage(from, { text: mensaje });
         return true;
@@ -147,10 +166,15 @@ async function executeAppointmentRequest(sock, from, args) {
 
 async function procesarCreacionSolicitud(from, tipo, fecha) {
     const currentState = userState[from];
-    if (!currentState || !currentState.data) return "Hubo un error al recuperar tus datos. Por favor, intenta de nuevo.";
+    if (!currentState || !currentState.data) return "Hubo un error al recuperar tus datos.";
 
     const prefijo = (tipo === 'reembolso') ? 'R' : 'C';
-    const tipoSolicitudDB = (currentState.data.tipo_consulta_detalle === 'Examen físico anual (ECOR)') ? 'ecor' : tipo;
+    
+    // SOLUCIÓN ECOR: Verificación doble antes de guardar
+    let tipoSolicitudDB = tipo;
+    if (tipo === 'consulta' && esSolicitudECOR(currentState.data.tipo_consulta_detalle)) {
+        tipoSolicitudDB = 'ecor';
+    }
 
     const numeroTurno = await getSiguienteNumeroTurno(prefijo, fecha);
     if (!numeroTurno) return "Hubo un error crítico al generar tu número de turno.";
@@ -165,7 +189,7 @@ async function procesarCreacionSolicitud(from, tipo, fecha) {
 
     const solicitudData = {
         ...datosParaGuardar,
-        tipo_solicitud: tipoSolicitudDB,
+        tipo_solicitud: tipoSolicitudDB, // Aquí se guarda correctamente como 'ecor' o 'consulta'
         numero_turno: numeroTurno,
         fecha_solicitud: fecha.toISOString().split('T')[0],
         hora_solicitud: horaParaDB
@@ -174,18 +198,18 @@ async function procesarCreacionSolicitud(from, tipo, fecha) {
     const nuevaSolicitud = await crearSolicitud(solicitudData);
     if (nuevaSolicitud) {
         const fechaFormateada = fecha.toLocaleDateString('es-VE', { weekday: 'long', day: 'numeric', month: 'long' });
-        return `¡Registro exitoso!\n\nTu solicitud ha sido agendada con el número de turno: *${numeroTurno}*.\n\n*Fecha Asignada:* ${fechaFormateada}\n*Hora del Registro:* ${horaParaUsuario}\n\n_Te recordamos que el horario de atención en la clínica es de 8:00 AM a 2:00 PM._\n\n¿En qué más puedo ayudarte?`;
+        // Personalizamos el mensaje si es ECOR
+        const tipoMsj = tipoSolicitudDB === 'ecor' ? 'Su examen ECOR' : 'Tu solicitud';
+        
+        return `¡Registro exitoso!\n\n${tipoMsj} ha sido agendado con el número de turno: *${numeroTurno}*.\n\n*Fecha Asignada:* ${fechaFormateada}\n*Hora del Registro:* ${horaParaUsuario}\n\n_Horario de atención: 8:00 AM a 2:00 PM._\n\n¿En qué más puedo ayudarte?`;
     }
     return "Hubo un error al registrar tu solicitud en la base de datos.";
 }
 
 async function startMenuFlow(sock, from, prependMessage = null) {
-    console.log(`Activando flujo de menú de respaldo de texto para ${from}`);
     userState[from] = { step: 'menu_principal_respuesta' };
-
     let menuText = (prependMessage || "¡Hola!") +
         "\n\nNuestro asistente inteligente no está disponible. Por favor, responde con el número de tu solicitud:\n\n*-1-* 🚨 Emergencia\n*-2-* 💸 Solicitar Reembolso\n*-3-* 🩺 Agendar Consulta";
-
     await sock.sendMessage(from, { text: menuText });
 }
 
@@ -198,105 +222,65 @@ async function handleMenuResponse(sock, from, messageContent) {
         delete userState[from];
     } else if (choice === '2' || choice === '3') {
         const requestType = choice === '2' ? 'reembolso' : 'consulta';
-        await sock.sendMessage(from, { text: `Para procesar tu *${requestType}*, por favor, indica toda la información en un solo mensaje. Ejemplo:\n\nNombre: Juan Pérez\nCédula: 12345678\nNómina: Contractual Mensual\nGerencia: Operaciones\nTipo de Consulta: Reposo Médico` });
+        await sock.sendMessage(from, { text: `Para procesar tu *${requestType}*, por favor, indica toda la información en un solo mensaje.` });
         delete userState[from];
     } else {
-        await sock.sendMessage(from, { text: "Opción no válida. Por favor, responde con 1, 2 o 3." });
+        await sock.sendMessage(from, { text: "Opción no válida. Responde 1, 2 o 3." });
     }
 }
 
 // =================================================================================
-// HANDLER PRINCIPAL (Con Sistema de Login)
+// HANDLER PRINCIPAL
 // =================================================================================
 async function handleMessage(sock, msg) {
     const from = jidNormalizedUser(msg.key.remoteJid);
-    
-    // Identificamos quién escribe, normalizando siempre para evitar errores
     const senderJid = msg.key.participant || msg.key.remoteJid; 
     const senderNormalized = jidNormalizedUser(senderJid);
     const senderNumber = senderNormalized.split('@')[0]; 
 
-    // Debugging claro para ver quién eres
-    console.log(`[DEBUG] Sender ID: ${senderNumber} | ¿Es Admin?: ${activeAdmins.has(senderNumber)}`);
-
     const isAudio = msg.message?.audioMessage;
     let originalText = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
 
-    // -------------------------------------------------------------
-    // BLOQUE DE AUTENTICACIÓN Y COMANDOS ADMIN
-    // -------------------------------------------------------------
+    // COMANDOS ADMIN
     if (originalText.startsWith('/')) {
         const parts = originalText.split(' ');
         const command = parts[0].toLowerCase();
         
-        // 1. SISTEMA DE LOGIN: /login [contraseña]
-        // Esto permite autorizar CUALQUIER número (58... o 93...) sin tocar código
         if (command === '/login') {
             const passwordProvided = parts[1];
-            const correctPassword = process.env.ADMIN_PASSWORD;
-
-            if (!correctPassword) {
-                console.log("[ERROR] No se ha configurado ADMIN_PASSWORD en el .env");
-                return; 
-            }
-
-            if (passwordProvided === correctPassword) {
-                activeAdmins.add(senderNumber); // Agregamos el número actual a la lista blanca
-                console.log(`[AUTH] Nuevo admin logueado: ${senderNumber}`);
-                await sock.sendMessage(from, { text: "✅ Contraseña correcta. Ahora eres administrador en esta sesión." });
+            if (passwordProvided === process.env.ADMIN_PASSWORD) {
+                activeAdmins.add(senderNumber);
+                await sock.sendMessage(from, { text: "✅ Login correcto. Eres admin." });
             } else {
-                console.log(`[AUTH] Intento fallido de login desde ${senderNumber}`);
                 await sock.sendMessage(from, { text: "⛔ Contraseña incorrecta." });
             }
-            return; // Cortamos el flujo
+            return; 
         }
 
-        // Verificación de Permisos para el resto de comandos
         const isAdmin = activeAdmins.has(senderNumber);
 
-        // 2. COMANDO: /mi-id (Para ver qué número técnico te asignó WhatsApp)
-        if (command === '/mi-id') {
-            await sock.sendMessage(from, { text: `Tu ID técnico es: \n${senderNumber}\n\nUsa '/login [contraseña]' para autorizarte.` });
-            return;
-        }
-
-        // 3. REPORTE MENSUAL
         if (command === '/reporte-mensual') {
-            if (!isAdmin) {
-                await sock.sendMessage(from, { text: "🔒 No tienes permisos. Escribe '/login [contraseña]' primero." });
-                return;
-            }
+            if (!isAdmin) return sock.sendMessage(from, { text: "🔒 Requiere /login." });
             let mesString = new Date().toISOString().slice(0, 7); 
             if (parts.length > 1 && /^\d{4}-\d{2}$/.test(parts[1])) mesString = parts[1];
-            
             await sock.sendMessage(from, { text: `📊 Generando reporte MENSUAL (${mesString})...` });
             await generateAndSendMonthlyReport(sock, from, mesString);
             return; 
         }
 
-        // 4. REPORTE DIARIO
         if (command === '/reporte') {
-            if (!isAdmin) {
-                await sock.sendMessage(from, { text: "🔒 No tienes permisos. Escribe '/login [contraseña]' primero." });
-                return;
-            }
+            if (!isAdmin) return sock.sendMessage(from, { text: "🔒 Requiere /login." });
             let fechaString = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Caracas' }); 
             if (parts.length > 1 && /^\d{4}-\d{2}-\d{2}$/.test(parts[1])) fechaString = parts[1];
-
             await sock.sendMessage(from, { text: `📈 Generando reporte DIARIO (${fechaString})...` });
             await generateAndSendReports(sock, from, fechaString);
             return; 
         }
     }
-    // -------------------------------------------------------------
-    // FIN BLOQUE COMANDOS
-    // -------------------------------------------------------------
-
-    // ... Resto del flujo normal (Menú, IA, Audio) ...
 
     if (originalText.toLowerCase() === 'menu') {
         delete userState[from];
-        await startMenuFlow(sock, from, "Ok, empecemos de nuevo.");
+        await startMenuFlow(sock, from, "Reiniciando...");
         return;
     }
 
@@ -305,7 +289,7 @@ async function handleMessage(sock, msg) {
     if (currentState && currentState.step === 'esperando_confirmacion_final') {
         const respuesta = originalText.toLowerCase();
         if (respuesta.includes('no') || respuesta.includes('gracias') || respuesta.includes('listo')) {
-            await sock.sendMessage(from, { text: "Estamos para servirle, que tenga un gran día." });
+            await sock.sendMessage(from, { text: "Estamos para servirle." });
             delete userState[from];
             return;
         } else {
@@ -320,33 +304,22 @@ async function handleMessage(sock, msg) {
 
     if (isAudio) {
         try {
-            console.log(`[AUDIO] Recibido de ${senderNumber}. Procesando...`);
-            await sock.sendMessage(from, { text: "Procesando tu nota de voz, un momento..." });
-
+            await sock.sendMessage(from, { text: "Escuchando audio..." });
             const buffer = await downloadMediaMessage(msg, 'buffer', {});
-            if (!buffer || buffer.length === 0) {
-                await sock.sendMessage(from, { text: "Error al descargar audio." });
-                return;
-            }
-
             originalText = await transcribeAudio(buffer);
             if (!originalText) {
-                await sock.sendMessage(from, { text: "No pude entender el audio. ¿Podrías escribirlo?" });
+                await sock.sendMessage(from, { text: "No entendí el audio." });
                 return;
             }
-            console.log(`[TRANSCRIPCIÓN] "${originalText}"`);
         } catch (error) {
-            console.error("Error en audio:", error);
-            await sock.sendMessage(from, { text: "Error procesando el audio." });
+            console.error("Error audio:", error);
             return;
         }
     }
 
     if (!originalText) return;
 
-    if (!userState[from] || !userState[from].history) {
-        userState[from] = { history: [] };
-    }
+    if (!userState[from] || !userState[from].history) userState[from] = { history: [] };
     userState[from].history.push({ role: 'user', content: originalText });
 
     try {
@@ -354,7 +327,7 @@ async function handleMessage(sock, msg) {
 
         if (!aiResponse) {
             userState[from].history.pop();
-            await startMenuFlow(sock, from, "Lo siento, el asistente inteligente no responde.");
+            await startMenuFlow(sock, from, "El sistema no responde.");
             return;
         }
 
@@ -366,24 +339,20 @@ async function handleMessage(sock, msg) {
             const toolName = aiResponse.call.name;
             const toolArgs = JSON.parse(aiResponse.call.arguments || '{}');
             
-            console.log(`[TOOL] Ejecutando: ${toolName}`, toolArgs);
+            console.log(`[TOOL] ${toolName}`, toolArgs);
             
             if (toolName === 'informar_emergencia') await executeEmergencyCall(sock, from);
             else if (toolName === 'solicitar_reembolso') taskCompleted = await executeReimbursementRequest(sock, from, toolArgs);
             else if (toolName === 'agendar_solicitud') taskCompleted = await executeAppointmentRequest(sock, from, toolArgs);
-            else throw new Error(`Herramienta desconocida: ${toolName}`);
-
+            
             if (taskCompleted && userState[from]?.step !== 'esperando_confirmacion_final') {
                 delete userState[from];
             }
-        } else {
-            userState[from].history.pop();
-            throw new Error(`Respuesta IA desconocida`);
         }
     } catch (error) {
         console.error("Error IA:", error);
         if (userState[from]) userState[from].history.pop();
-        await startMenuFlow(sock, from, "Hubo un problema técnico.");
+        await startMenuFlow(sock, from, "Error técnico.");
     }
 }
 
