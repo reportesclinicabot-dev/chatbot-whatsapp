@@ -8,7 +8,7 @@ require('dotenv').config();
 
 const userState = {};
 
-// Almacenamiento temporal de admins logueados en memoria
+// Almacenamiento temporal de admins logueados
 const activeAdmins = new Set();
 const envNumber = (process.env.REPORT_WHATSAPP_NUMBER || '').replace(/[^0-9]/g, '');
 if (envNumber) activeAdmins.add(envNumber);
@@ -22,22 +22,23 @@ async function executeEmergencyCall(sock, from) {
     const fechaISO = ahora.toISOString().split('T')[0];
     const horaParaDB = ahora.toTimeString().slice(0, 8);
 
-    // SOLUCIÓN EMERGENCIA: Llenamos los datos obligatorios con "EMERGENCIA"
-    // para que Supabase no rechace el registro.
+    // --- CORRECCIÓN DB ---
+    // Tu base de datos solo acepta 'consulta', 'reembolso' o 'ecor'.
+    // Guardamos como 'consulta' para que no de error, pero marcamos el turno como EMERGENCIA.
     await crearSolicitud({
-        tipo_solicitud: 'emergencia',
+        tipo_solicitud: 'consulta', // <--- CAMBIO IMPORTANTE: Para cumplir con el CHECK de la DB
         nombre_paciente: 'EMERGENCIA',
-        apellido_paciente: 'EMERGENCIA',
+        apellido_paciente: 'DETECTADA',
         cedula: '00000000',
         nomina: 'N/A',
         gerencia: 'N/A',
         fecha_solicitud: fechaISO,
         hora_solicitud: horaParaDB,
-        numero_turno: 'EMERGENCIA',
+        numero_turno: 'EMERGENCIA', // <--- Esto nos servirá para filtrarlo en el reporte
         tipo_consulta_detalle: 'Contacto de Emergencia'
     });
 
-    console.log(`[DB] Emergencia registrada para ${from}`);
+    console.log(`[DB] Emergencia registrada exitosamente para ${from}`);
     await sock.sendMessage(from, { text: "Detecté una emergencia. Por favor, comunícate directamente al siguiente número:\n*0265-8053063*" });
 }
 
@@ -89,8 +90,6 @@ async function findNextAvailableDate(tipo, diaDeseadoString = null, esEcor = fal
     for (let i = 0; i < 7; i++) {
         const currentDay = searchDate.getDay();
         if (currentDay >= 1 && currentDay <= 5) {
-            // Si es ECOR, buscamos cupos en la columna de consulta o ecor según tu lógica DB
-            // Aquí asumo que ECOR comparte cupos o tiene lógica propia, pero forzamos el tipo
             const tipoBusqueda = esEcor ? 'ecor' : tipo; 
             const cupos = await getCuposDisponibles(tipoBusqueda, searchDate);
             if (cupos > 0) {
@@ -106,12 +105,10 @@ async function handleSchedulingRequest(sock, from, tipo, args) {
     userState[from] = { data: args }; 
     const diaDeseado = args.dia_semana_deseado;
     
-    // SOLUCIÓN ECOR: Detección robusta
+    // SOLUCIÓN ECOR
     const esEcor = esSolicitudECOR(args.tipo_consulta_detalle);
-    const tipoReal = esEcor ? 'ecor' : tipo;
 
     if (esEcor) {
-        // Lógica específica para ECOR (sin límite o lógica diferente de fecha)
         let fechaCita = getInitialSearchDate();
         if (diaDeseado) {
             const targetDay = getDayOfWeekAsNumber(diaDeseado);
@@ -124,7 +121,6 @@ async function handleSchedulingRequest(sock, from, tipo, args) {
         if (fechaCita.getDay() === 0) fechaCita.setDate(fechaCita.getDate() + 1);
         if (fechaCita.getDay() === 6) fechaCita.setDate(fechaCita.getDate() + 2);
 
-        // Importante: Pasamos 'ecor' explícitamente
         const mensaje = await procesarCreacionSolicitud(from, 'ecor', fechaCita);
         await sock.sendMessage(from, { text: mensaje });
         return true;
@@ -170,7 +166,7 @@ async function procesarCreacionSolicitud(from, tipo, fecha) {
 
     const prefijo = (tipo === 'reembolso') ? 'R' : 'C';
     
-    // SOLUCIÓN ECOR: Verificación doble antes de guardar
+    // SOLUCIÓN ECOR: Forzamos el tipo si detectamos que es ecor
     let tipoSolicitudDB = tipo;
     if (tipo === 'consulta' && esSolicitudECOR(currentState.data.tipo_consulta_detalle)) {
         tipoSolicitudDB = 'ecor';
@@ -189,7 +185,7 @@ async function procesarCreacionSolicitud(from, tipo, fecha) {
 
     const solicitudData = {
         ...datosParaGuardar,
-        tipo_solicitud: tipoSolicitudDB, // Aquí se guarda correctamente como 'ecor' o 'consulta'
+        tipo_solicitud: tipoSolicitudDB,
         numero_turno: numeroTurno,
         fecha_solicitud: fecha.toISOString().split('T')[0],
         hora_solicitud: horaParaDB
@@ -198,7 +194,6 @@ async function procesarCreacionSolicitud(from, tipo, fecha) {
     const nuevaSolicitud = await crearSolicitud(solicitudData);
     if (nuevaSolicitud) {
         const fechaFormateada = fecha.toLocaleDateString('es-VE', { weekday: 'long', day: 'numeric', month: 'long' });
-        // Personalizamos el mensaje si es ECOR
         const tipoMsj = tipoSolicitudDB === 'ecor' ? 'Su examen ECOR' : 'Tu solicitud';
         
         return `¡Registro exitoso!\n\n${tipoMsj} ha sido agendado con el número de turno: *${numeroTurno}*.\n\n*Fecha Asignada:* ${fechaFormateada}\n*Hora del Registro:* ${horaParaUsuario}\n\n_Horario de atención: 8:00 AM a 2:00 PM._\n\n¿En qué más puedo ayudarte?`;
