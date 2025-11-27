@@ -14,7 +14,7 @@ async function createExcelReport(datos, fechaString) {
     workbook.creator = 'AsistenteVirtualClinica';
     workbook.created = new Date();
 
-    // 1. Hoja de Consultas (Excluye ECOR)
+    // 1. Hoja de Consultas (General)
     const consultasSheet = workbook.addWorksheet('Consultas');
     consultasSheet.columns = [
         { header: 'Turno', key: 'numero_turno', width: 12 },
@@ -27,8 +27,9 @@ async function createExcelReport(datos, fechaString) {
         { header: 'Fecha Asignada', key: 'fecha_solicitud', width: 15 },
         { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
     ];
-    // Filtramos estrictamente consultas (que NO sean ecor)
-    const consultasData = datos.filter(d => d.tipo_solicitud === 'consulta');
+    // FILTRO IMPORTANTE:
+    // Traemos todo lo que sea 'consulta' PERO que el turno NO sea 'EMERGENCIA'
+    const consultasData = datos.filter(d => d.tipo_solicitud === 'consulta' && d.numero_turno !== 'EMERGENCIA');
     consultasSheet.addRows(consultasData);
 
     // 2. Hoja de ECOR
@@ -43,7 +44,6 @@ async function createExcelReport(datos, fechaString) {
         { header: 'Fecha Asignada', key: 'fecha_solicitud', width: 15 },
         { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
     ];
-    // Ahora sí capturará los que guardamos explícitamente como 'ecor'
     const ecorData = datos.filter(d => d.tipo_solicitud === 'ecor');
     ecorSheet.addRows(ecorData);
 
@@ -65,9 +65,11 @@ async function createExcelReport(datos, fechaString) {
     emergenciasSheet.columns = [
         { header: 'Fecha Registro', key: 'fecha_solicitud', width: 15 },
         { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
-        { header: 'Tipo', key: 'tipo_consulta_detalle', width: 30 }, // Aquí saldrá "Contacto de Emergencia"
+        { header: 'Tipo', key: 'tipo_consulta_detalle', width: 30 }, 
     ];
-    const emergenciasData = datos.filter(d => d.tipo_solicitud === 'emergencia');
+    // FILTRO IMPORTANTE:
+    // Capturamos las emergencias usando la marca que pusimos en numero_turno
+    const emergenciasData = datos.filter(d => d.numero_turno === 'EMERGENCIA');
     emergenciasSheet.addRows(emergenciasData);
 
     const filePath = path.join(__dirname, `Reporte_${fechaString}.xlsx`);
