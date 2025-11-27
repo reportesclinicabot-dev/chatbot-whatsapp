@@ -7,18 +7,14 @@ const fs = require('fs');
 const { getDatosReporteDiario, getDatosReporteMensual } = require('./database');
 require('dotenv').config();
 
-// Inicializamos Resend
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-/**
- * Crea el archivo Excel con los datos proporcionados
- */
 async function createExcelReport(datos, fechaString) {
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'AsistenteVirtualClinica';
     workbook.created = new Date();
 
-    // 1. Hoja de Consultas (General)
+    // 1. Hoja de Consultas (Excluye ECOR)
     const consultasSheet = workbook.addWorksheet('Consultas');
     consultasSheet.columns = [
         { header: 'Turno', key: 'numero_turno', width: 12 },
@@ -28,8 +24,10 @@ async function createExcelReport(datos, fechaString) {
         { header: 'Tipo Consulta', key: 'tipo_consulta_detalle', width: 25 },
         { header: 'Nómina', key: 'nomina', width: 15 },
         { header: 'Gerencia', key: 'gerencia', width: 25 },
+        { header: 'Fecha Asignada', key: 'fecha_solicitud', width: 15 },
         { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
     ];
+    // Filtramos estrictamente consultas (que NO sean ecor)
     const consultasData = datos.filter(d => d.tipo_solicitud === 'consulta');
     consultasSheet.addRows(consultasData);
 
@@ -42,8 +40,10 @@ async function createExcelReport(datos, fechaString) {
         { header: 'Cédula', key: 'cedula', width: 15 },
         { header: 'Nómina', key: 'nomina', width: 15 },
         { header: 'Gerencia', key: 'gerencia', width: 25 },
+        { header: 'Fecha Asignada', key: 'fecha_solicitud', width: 15 },
         { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
     ];
+    // Ahora sí capturará los que guardamos explícitamente como 'ecor'
     const ecorData = datos.filter(d => d.tipo_solicitud === 'ecor');
     ecorSheet.addRows(ecorData);
 
@@ -54,6 +54,7 @@ async function createExcelReport(datos, fechaString) {
         { header: 'Nombre', key: 'nombre_paciente', width: 25 },
         { header: 'Apellido', key: 'apellido_paciente', width: 25 },
         { header: 'Cédula', key: 'cedula', width: 15 },
+        { header: 'Fecha Asignada', key: 'fecha_solicitud', width: 15 },
         { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
     ];
     const reembolsosData = datos.filter(d => d.tipo_solicitud === 'reembolso');
@@ -62,9 +63,9 @@ async function createExcelReport(datos, fechaString) {
     // 4. Hoja de Emergencias
     const emergenciasSheet = workbook.addWorksheet('Emergencias');
     emergenciasSheet.columns = [
-        { header: 'Fecha', key: 'fecha_solicitud', width: 15 },
-        { header: 'Hora', key: 'hora_solicitud', width: 15 },
-        { header: 'Mensaje', key: 'mensaje', width: 50 }, 
+        { header: 'Fecha Registro', key: 'fecha_solicitud', width: 15 },
+        { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
+        { header: 'Tipo', key: 'tipo_consulta_detalle', width: 30 }, // Aquí saldrá "Contacto de Emergencia"
     ];
     const emergenciasData = datos.filter(d => d.tipo_solicitud === 'emergencia');
     emergenciasSheet.addRows(emergenciasData);
@@ -74,77 +75,52 @@ async function createExcelReport(datos, fechaString) {
     return filePath;
 }
 
-/**
- * Envía el correo usando Resend
- */
 async function sendEmailWithAttachment(filePath, asunto) {
-    if (!process.env.RESEND_API_KEY) {
-        console.log("❌ [EMAIL] No se envió el correo: Falta RESEND_API_KEY en .env");
-        return;
-    }
-    if (!process.env.REPORT_EMAIL_TO) {
-        console.log("❌ [EMAIL] No se envió el correo: Falta REPORT_EMAIL_TO en .env");
+    if (!process.env.RESEND_API_KEY || !process.env.REPORT_EMAIL_TO) {
+        console.log("❌ [EMAIL] Faltan credenciales en .env");
         return;
     }
 
     try {
-        console.log(`[EMAIL] Preparando envío a: ${process.env.REPORT_EMAIL_TO}`);
         const fileContent = fs.readFileSync(filePath);
-
-        const { data, error } = await resend.emails.send({
+        await resend.emails.send({
             from: "Asistente Virtual <onboarding@resend.dev>",
             to: process.env.REPORT_EMAIL_TO,
             subject: asunto,
-            html: '<p>Adjunto encontrarás el reporte solicitado generado por el sistema.</p>',
+            html: '<p>Adjunto encontrarás el reporte generado.</p>',
             attachments: [{
                 filename: path.basename(filePath),
                 content: fileContent,
             }],
         });
-
-        if (error) {
-            console.error('❌ [EMAIL ERROR API] Resend respondió con error:', error);
-            return;
-        }
-
-        console.log('✅ [EMAIL] Correo enviado exitosamente. ID:', data.id);
+        console.log('✅ [EMAIL] Correo enviado.');
     } catch (error) {
-        console.error('❌ [EMAIL EXCEPTION] Error inesperado al enviar correo:', error);
+        console.error('❌ [EMAIL ERROR]', error);
     }
 }
 
-// --- COMANDO AUTOMÁTICO (CRON) ---
 async function generateAndEmailReport(fechaString) {
-    console.log(`[AUTO] Iniciando reporte automático para: ${fechaString}`);
+    console.log(`[AUTO] Reporte automático: ${fechaString}`);
     try {
         const datos = await getDatosReporteDiario(fechaString);
-        if (datos.length === 0) {
-            console.log(`[AUTO] Sin datos para ${fechaString}. No se envía nada.`);
-            return;
-        }
+        if (datos.length === 0) return console.log("[AUTO] Sin datos.");
+        
         const filePath = await createExcelReport(datos, fechaString);
-        await sendEmailWithAttachment(filePath, `Reporte Diario Automático - ${fechaString}`);
+        await sendEmailWithAttachment(filePath, `Reporte Automático - ${fechaString}`);
         fs.unlinkSync(filePath);
-        console.log('[AUTO] Archivo eliminado tras envío.');
     } catch (error) {
-        console.error('[AUTO] Error crítico:', error);
+        console.error('[AUTO] Error:', error);
     }
 }
 
-// --- COMANDO MANUAL WHATSAPP (/reporte) ---
 async function generateAndSendReports(sock, recipientJid, fechaString) {
-    console.log(`[MANUAL] Reporte DIARIO para: ${fechaString}`);
+    console.log(`[MANUAL] Reporte diario: ${fechaString}`);
     try {
         const datos = await getDatosReporteDiario(fechaString);
-
-        if (datos.length === 0) {
-            await sock.sendMessage(recipientJid, { text: `📅 Reporte del ${fechaString}: Sin registros.` });
-            return;
-        }
+        if (datos.length === 0) return await sock.sendMessage(recipientJid, { text: `📅 Sin registros para ${fechaString}.` });
 
         const filePath = await createExcelReport(datos, fechaString);
 
-        // 1. Enviar por WhatsApp
         await sock.sendMessage(recipientJid, {
             document: { url: filePath },
             mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -152,32 +128,22 @@ async function generateAndSendReports(sock, recipientJid, fechaString) {
             caption: `📊 Reporte Diario (${fechaString})`
         });
 
-        // 2. Enviar por Correo (AHORA ACTIVADO Y CON LOGS)
-        await sendEmailWithAttachment(filePath, `Reporte Diario Solicitado - ${fechaString}`);
-
+        await sendEmailWithAttachment(filePath, `Reporte Diario - ${fechaString}`);
         fs.unlinkSync(filePath);
-        console.log('[MANUAL] Archivo eliminado.');
-
     } catch (error) {
         console.error('[MANUAL] Error:', error);
-        await sock.sendMessage(recipientJid, { text: `⚠️ Error al generar reporte: ${error.message}` });
+        await sock.sendMessage(recipientJid, { text: "Error generando reporte." });
     }
 }
 
-// --- COMANDO MANUAL WHATSAPP (/reporte-mensual) ---
 async function generateAndSendMonthlyReport(sock, recipientJid, monthYearString) {
-    console.log(`[MANUAL] Reporte MENSUAL para: ${monthYearString}`);
+    console.log(`[MANUAL] Reporte mensual: ${monthYearString}`);
     try {
         const datosMensuales = await getDatosReporteMensual(monthYearString);
-
-        if (datosMensuales.length === 0) {
-            await sock.sendMessage(recipientJid, { text: `📅 Reporte Mensual (${monthYearString}): Sin registros.` });
-            return;
-        }
+        if (datosMensuales.length === 0) return await sock.sendMessage(recipientJid, { text: `📅 Sin registros para ${monthYearString}.` });
 
         const filePath = await createExcelReport(datosMensuales, `MENSUAL_${monthYearString}`);
 
-        // 1. Enviar por WhatsApp
         await sock.sendMessage(recipientJid, {
             document: { url: filePath },
             mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -185,15 +151,11 @@ async function generateAndSendMonthlyReport(sock, recipientJid, monthYearString)
             caption: `📊 Reporte Mensual (${monthYearString})`
         });
 
-        // 2. Enviar por Correo (¡ESTO FALTABA ANTES!)
-        await sendEmailWithAttachment(filePath, `Reporte Mensual Solicitado - ${monthYearString}`);
-
+        await sendEmailWithAttachment(filePath, `Reporte Mensual - ${monthYearString}`);
         fs.unlinkSync(filePath);
-        console.log('[MANUAL] Archivo eliminado.');
-
     } catch (error) {
         console.error('[MANUAL] Error:', error);
-        await sock.sendMessage(recipientJid, { text: `⚠️ Error al generar reporte mensual: ${error.message}` });
+        await sock.sendMessage(recipientJid, { text: "Error generando reporte mensual." });
     }
 }
 
