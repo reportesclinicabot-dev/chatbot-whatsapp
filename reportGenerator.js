@@ -9,12 +9,60 @@ require('dotenv').config();
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+/**
+ * FUNCIONES DE FILTRADO INTELIGENTE
+ * Ayudan a clasificar datos aunque estén mal guardados en la DB.
+ */
+
+// Detecta si es ECOR leyendo el detalle, aunque la DB diga 'consulta'
+function esEcor(dato) {
+    const tipo = (dato.tipo_solicitud || '').toLowerCase();
+    const detalle = (dato.tipo_consulta_detalle || '').toLowerCase();
+    
+    // Es ECOR si el tipo es 'ecor' O si el detalle menciona ecor/físico
+    return tipo === 'ecor' || detalle.includes('ecor') || detalle.includes('físico') || detalle.includes('fisico');
+}
+
+// Detecta si es Emergencia leyendo el turno o el tipo
+function esEmergencia(dato) {
+    const turno = (dato.numero_turno || '');
+    const tipo = (dato.tipo_solicitud || '').toLowerCase();
+    
+    // Es emergencia si el turno dice EMERGENCIA o el tipo es 'emergencia'
+    return turno === 'EMERGENCIA' || tipo === 'emergencia';
+}
+
 async function createExcelReport(datos, fechaString) {
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'AsistenteVirtualClinica';
     workbook.created = new Date();
 
-    // 1. Hoja de Consultas (General)
+    // ---------------------------------------------------------
+    // 1. PREPARAR DATOS (Clasificación)
+    // ---------------------------------------------------------
+    
+    // Filtramos ECOR primero (buscando en el texto si hace falta)
+    const ecorData = datos.filter(d => esEcor(d));
+
+    // Filtramos Emergencias
+    const emergenciasData = datos.filter(d => esEmergencia(d));
+
+    // Filtramos Reembolsos (estos suelen estar bien)
+    const reembolsosData = datos.filter(d => d.tipo_solicitud === 'reembolso');
+
+    // Filtramos Consultas:
+    // Son las que dicen 'consulta' PERO NO son ECOR Y NO son Emergencia
+    const consultasData = datos.filter(d => 
+        d.tipo_solicitud === 'consulta' && 
+        !esEcor(d) && 
+        !esEmergencia(d)
+    );
+
+    // ---------------------------------------------------------
+    // 2. CREAR HOJAS
+    // ---------------------------------------------------------
+
+    // --- HOJA CONSULTAS ---
     const consultasSheet = workbook.addWorksheet('Consultas');
     consultasSheet.columns = [
         { header: 'Turno', key: 'numero_turno', width: 12 },
@@ -27,12 +75,9 @@ async function createExcelReport(datos, fechaString) {
         { header: 'Fecha Asignada', key: 'fecha_solicitud', width: 15 },
         { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
     ];
-    // FILTRO IMPORTANTE:
-    // Traemos todo lo que sea 'consulta' PERO que el turno NO sea 'EMERGENCIA'
-    const consultasData = datos.filter(d => d.tipo_solicitud === 'consulta' && d.numero_turno !== 'EMERGENCIA');
     consultasSheet.addRows(consultasData);
 
-    // 2. Hoja de ECOR
+    // --- HOJA ECOR ---
     const ecorSheet = workbook.addWorksheet('ECOR');
     ecorSheet.columns = [
         { header: 'Turno', key: 'numero_turno', width: 12 },
@@ -44,10 +89,9 @@ async function createExcelReport(datos, fechaString) {
         { header: 'Fecha Asignada', key: 'fecha_solicitud', width: 15 },
         { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
     ];
-    const ecorData = datos.filter(d => d.tipo_solicitud === 'ecor');
     ecorSheet.addRows(ecorData);
 
-    // 3. Hoja de Reembolsos
+    // --- HOJA REEMBOLSOS ---
     const reembolsosSheet = workbook.addWorksheet('Reembolsos');
     reembolsosSheet.columns = [
         { header: 'Turno', key: 'numero_turno', width: 12 },
@@ -57,25 +101,26 @@ async function createExcelReport(datos, fechaString) {
         { header: 'Fecha Asignada', key: 'fecha_solicitud', width: 15 },
         { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
     ];
-    const reembolsosData = datos.filter(d => d.tipo_solicitud === 'reembolso');
     reembolsosSheet.addRows(reembolsosData);
 
-    // 4. Hoja de Emergencias
+    // --- HOJA EMERGENCIAS ---
     const emergenciasSheet = workbook.addWorksheet('Emergencias');
     emergenciasSheet.columns = [
         { header: 'Fecha Registro', key: 'fecha_solicitud', width: 15 },
         { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
-        { header: 'Tipo', key: 'tipo_consulta_detalle', width: 30 }, 
+        { header: 'Detalle', key: 'tipo_consulta_detalle', width: 30 }, 
+        { header: 'Turno ID', key: 'numero_turno', width: 15 },
     ];
-    // FILTRO IMPORTANTE:
-    // Capturamos las emergencias usando la marca que pusimos en numero_turno
-    const emergenciasData = datos.filter(d => d.numero_turno === 'EMERGENCIA');
     emergenciasSheet.addRows(emergenciasData);
 
     const filePath = path.join(__dirname, `Reporte_${fechaString}.xlsx`);
     await workbook.xlsx.writeFile(filePath);
     return filePath;
 }
+
+// ---------------------------------------------------------
+// FUNCIONES DE ENVÍO (Resend + WhatsApp)
+// ---------------------------------------------------------
 
 async function sendEmailWithAttachment(filePath, asunto) {
     if (!process.env.RESEND_API_KEY || !process.env.REPORT_EMAIL_TO) {
