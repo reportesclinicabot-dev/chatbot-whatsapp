@@ -246,29 +246,32 @@ async function handleMenuResponse(sock, from, messageContent) {
         await executeEmergencyCall(sock, from, "Botón de Pánico (Menú)");
         delete userState[from];
     } 
-    // OPCIÓN 2: REEMBOLSO (Instrucciones Simplificadas)
+    // OPCIÓN 2: REEMBOLSO (Simple: Nombre y Cédula)
     else if (choice === '2') {
         await sock.sendMessage(from, { text: 
             "💸 *Solicitud de Reembolso Manual*\n\n" +
-            "Como nuestro asistente inteligente no está disponible, por favor escribe tus datos en un solo mensaje así:\n\n" +
-            "Reembolso para: Nombre y Apellido\n" +
-            "Cédula: XXXXXXX" 
+            "Como el asistente inteligente no está disponible, escribe todo en un solo mensaje:\n\n" +
+            "1. Nombre y Apellido\n" +
+            "2. Cédula" 
         });
-        // IMPORTANTE: Aquí borramos el estado para que el próximo mensaje
-        // intente ser procesado de nuevo, o si la IA sigue muerta,
-        // al menos el usuario ya sabe qué datos mandar.
         delete userState[from];
     } 
-    // OPCIÓN 3: CITA (Instrucciones Completas)
+    // OPCIÓN 3: CITA (Detallada con Nóminas correctas)
     else if (choice === '3') {
         await sock.sendMessage(from, { text: 
             "🩺 *Solicitud de Cita Manual*\n\n" +
-            "Por favor indica todos los detalles en un solo mensaje:\n\n" +
-            "Nombre y Apellido: ...\n" +
-            "Cédula: ...\n" +
-            "Nómina: ...\n" +
-            "Gerencia: ...\n" +
-            "Motivo de consulta: ..." 
+            "Por favor escribe un solo mensaje con estos datos:\n\n" +
+            "1. Nombre y Apellido:\n" +
+            "2. Cédula:\n" +
+            "3. Nómina (Escribe una de estas):\n" +
+            "   🔹 Contractual Diaria\n" +
+            "   🔹 Contractual Mensual\n" +
+            "   🔹 No Contractual\n" +
+            "4. Gerencia:\n" +
+            "5. Tipo de Cita (Escribe una):\n" +
+            "   👉 Consulta Integral\n" +
+            "   👉 Reposo Médico\n" +
+            "   👉 Examen Físico (ECOR)" 
         });
         delete userState[from];
     } 
