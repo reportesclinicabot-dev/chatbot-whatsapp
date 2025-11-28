@@ -238,18 +238,46 @@ async function startMenuFlow(sock, from, prependMessage = null) {
 async function handleMenuResponse(sock, from, messageContent) {
     const currentState = userState[from];
     if (!currentState || currentState.step !== 'menu_principal_respuesta') return;
+    
     const choice = messageContent.trim();
+
+    // OPCIÓN 1: EMERGENCIA
     if (choice === '1') {
         await executeEmergencyCall(sock, from, "Botón de Pánico (Menú)");
         delete userState[from];
-    } else if (choice === '2' || choice === '3') {
-        const requestType = choice === '2' ? 'reembolso' : 'consulta';
-        await sock.sendMessage(from, { text: `Para procesar tu *${requestType}*, por favor, indica toda la información en un solo mensaje.` });
+    } 
+    // OPCIÓN 2: REEMBOLSO (Instrucciones Simplificadas)
+    else if (choice === '2') {
+        await sock.sendMessage(from, { text: 
+            "💸 *Solicitud de Reembolso Manual*\n\n" +
+            "Como nuestro asistente inteligente no está disponible, por favor escribe tus datos en un solo mensaje así:\n\n" +
+            "Reembolso para: Nombre y Apellido\n" +
+            "Cédula: XXXXXXX" 
+        });
+        // IMPORTANTE: Aquí borramos el estado para que el próximo mensaje
+        // intente ser procesado de nuevo, o si la IA sigue muerta,
+        // al menos el usuario ya sabe qué datos mandar.
         delete userState[from];
-    } else {
-        await sock.sendMessage(from, { text: "Opción no válida. Responde 1, 2 o 3." });
+    } 
+    // OPCIÓN 3: CITA (Instrucciones Completas)
+    else if (choice === '3') {
+        await sock.sendMessage(from, { text: 
+            "🩺 *Solicitud de Cita Manual*\n\n" +
+            "Por favor indica todos los detalles en un solo mensaje:\n\n" +
+            "Nombre y Apellido: ...\n" +
+            "Cédula: ...\n" +
+            "Nómina: ...\n" +
+            "Gerencia: ...\n" +
+            "Motivo de consulta: ..." 
+        });
+        delete userState[from];
+    } 
+    // ERROR
+    else {
+        await sock.sendMessage(from, { text: "Opción no válida. Por favor responde solo el número: 1, 2 o 3." });
     }
 }
+
 
 // =================================================================================
 // HANDLER PRINCIPAL
