@@ -17,16 +17,23 @@ if (envNumber) activeAdmins.add(envNumber);
 // FUNCIONES AUXILIARES
 // =================================================================================
 
-async function executeEmergencyCall(sock, from) {
+// MODIFICADO: Ahora recibe 'textoMotivo' para guardar qué pasó
+async function executeEmergencyCall(sock, from, textoMotivo) {
     const ahora = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Caracas" }));
     const fechaISO = ahora.toISOString().split('T')[0];
     const horaParaDB = ahora.toTimeString().slice(0, 8);
+    
+    // Generamos un sufijo único para que la DB no rechace por duplicado
+    // Ejemplo de turno: EMERGENCIA-143045 (HoraMinutoSegundo)
+    const sufijoUnico = horaParaDB.replace(/:/g, ''); 
+    const turnoUnico = `EMERGENCIA-${sufijoUnico}`;
 
-    // --- CORRECCIÓN DB ---
-    // Tu base de datos solo acepta 'consulta', 'reembolso' o 'ecor'.
-    // Guardamos como 'consulta' para que no de error, pero marcamos el turno como EMERGENCIA.
+    // Limpiamos el texto (quitamos la palabra "emergencia" si el usuario la escribió)
+    let detalle = (textoMotivo || '').replace(/emergencia/gi, '').trim();
+    if (!detalle) detalle = "Contacto de Emergencia (Botón Pánico)";
+
     await crearSolicitud({
-        tipo_solicitud: 'consulta', // <--- CAMBIO IMPORTANTE: Para cumplir con el CHECK de la DB
+        tipo_solicitud: 'consulta', // Mantenemos 'consulta' para pasar la validación DB
         nombre_paciente: 'EMERGENCIA',
         apellido_paciente: 'DETECTADA',
         cedula: '00000000',
@@ -34,12 +41,12 @@ async function executeEmergencyCall(sock, from) {
         gerencia: 'N/A',
         fecha_solicitud: fechaISO,
         hora_solicitud: horaParaDB,
-        numero_turno: 'EMERGENCIA', // <--- Esto nos servirá para filtrarlo en el reporte
-        tipo_consulta_detalle: 'Contacto de Emergencia'
+        numero_turno: turnoUnico, // AHORA ES ÚNICO
+        tipo_consulta_detalle: detalle // AHORA GUARDAMOS EL MOTIVO
     });
 
-    console.log(`[DB] Emergencia registrada exitosamente para ${from}`);
-    await sock.sendMessage(from, { text: "Detecté una emergencia. Por favor, comunícate directamente al siguiente número:\n*0265-8053063*" });
+    console.log(`[DB] Emergencia registrada: ${turnoUnico} | Motivo: ${detalle}`);
+    await sock.sendMessage(from, { text: "🚨 Emergencia registrada. Por favor llama al: *0265-8053063*" });
 }
 
 function getDayOfWeekAsNumber(dayString) {
@@ -70,7 +77,6 @@ function getInitialSearchDate() {
     return fechaBusqueda;
 }
 
-// Helper para detectar ECOR de forma flexible
 function esSolicitudECOR(textoTipo) {
     if (!textoTipo) return false;
     const texto = textoTipo.toLowerCase();
@@ -105,7 +111,6 @@ async function handleSchedulingRequest(sock, from, tipo, args) {
     userState[from] = { data: args }; 
     const diaDeseado = args.dia_semana_deseado;
     
-    // SOLUCIÓN ECOR
     const esEcor = esSolicitudECOR(args.tipo_consulta_detalle);
 
     if (esEcor) {
@@ -165,8 +170,6 @@ async function procesarCreacionSolicitud(from, tipo, fecha) {
     if (!currentState || !currentState.data) return "Hubo un error al recuperar tus datos.";
 
     const prefijo = (tipo === 'reembolso') ? 'R' : 'C';
-    
-    // SOLUCIÓN ECOR: Forzamos el tipo si detectamos que es ecor
     let tipoSolicitudDB = tipo;
     if (tipo === 'consulta' && esSolicitudECOR(currentState.data.tipo_consulta_detalle)) {
         tipoSolicitudDB = 'ecor';
@@ -195,7 +198,6 @@ async function procesarCreacionSolicitud(from, tipo, fecha) {
     if (nuevaSolicitud) {
         const fechaFormateada = fecha.toLocaleDateString('es-VE', { weekday: 'long', day: 'numeric', month: 'long' });
         const tipoMsj = tipoSolicitudDB === 'ecor' ? 'Su examen ECOR' : 'Tu solicitud';
-        
         return `¡Registro exitoso!\n\n${tipoMsj} ha sido agendado con el número de turno: *${numeroTurno}*.\n\n*Fecha Asignada:* ${fechaFormateada}\n*Hora del Registro:* ${horaParaUsuario}\n\n_Horario de atención: 8:00 AM a 2:00 PM._\n\n¿En qué más puedo ayudarte?`;
     }
     return "Hubo un error al registrar tu solicitud en la base de datos.";
@@ -213,7 +215,8 @@ async function handleMenuResponse(sock, from, messageContent) {
     if (!currentState || currentState.step !== 'menu_principal_respuesta') return;
     const choice = messageContent.trim();
     if (choice === '1') {
-        await executeEmergencyCall(sock, from);
+        // Pasamos "Botón de pánico" como motivo si usan el menú
+        await executeEmergencyCall(sock, from, "Botón de Pánico (Menú)");
         delete userState[from];
     } else if (choice === '2' || choice === '3') {
         const requestType = choice === '2' ? 'reembolso' : 'consulta';
@@ -336,7 +339,10 @@ async function handleMessage(sock, msg) {
             
             console.log(`[TOOL] ${toolName}`, toolArgs);
             
-            if (toolName === 'informar_emergencia') await executeEmergencyCall(sock, from);
+            if (toolName === 'informar_emergencia') {
+                // MODIFICADO: Pasamos el texto original para guardarlo como motivo
+                await executeEmergencyCall(sock, from, originalText);
+            } 
             else if (toolName === 'solicitar_reembolso') taskCompleted = await executeReimbursementRequest(sock, from, toolArgs);
             else if (toolName === 'agendar_solicitud') taskCompleted = await executeAppointmentRequest(sock, from, toolArgs);
             
