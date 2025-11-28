@@ -9,27 +9,18 @@ require('dotenv').config();
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-/**
- * FUNCIONES DE FILTRADO INTELIGENTE
- * Ayudan a clasificar datos aunque estén mal guardados en la DB.
- */
-
-// Detecta si es ECOR leyendo el detalle, aunque la DB diga 'consulta'
+// Detecta si es ECOR leyendo el detalle
 function esEcor(dato) {
     const tipo = (dato.tipo_solicitud || '').toLowerCase();
     const detalle = (dato.tipo_consulta_detalle || '').toLowerCase();
-    
-    // Es ECOR si el tipo es 'ecor' O si el detalle menciona ecor/físico
     return tipo === 'ecor' || detalle.includes('ecor') || detalle.includes('físico') || detalle.includes('fisico');
 }
 
-// Detecta si es Emergencia leyendo el turno o el tipo
+// MODIFICADO: Ahora detecta emergencias si el turno EMPIEZA por EMERGENCIA
 function esEmergencia(dato) {
     const turno = (dato.numero_turno || '');
     const tipo = (dato.tipo_solicitud || '').toLowerCase();
-    
-    // Es emergencia si el turno dice EMERGENCIA o el tipo es 'emergencia'
-    return turno === 'EMERGENCIA' || tipo === 'emergencia';
+    return turno.startsWith('EMERGENCIA') || tipo === 'emergencia';
 }
 
 async function createExcelReport(datos, fechaString) {
@@ -38,20 +29,11 @@ async function createExcelReport(datos, fechaString) {
     workbook.created = new Date();
 
     // ---------------------------------------------------------
-    // 1. PREPARAR DATOS (Clasificación)
+    // 1. PREPARAR DATOS
     // ---------------------------------------------------------
-    
-    // Filtramos ECOR primero (buscando en el texto si hace falta)
     const ecorData = datos.filter(d => esEcor(d));
-
-    // Filtramos Emergencias
     const emergenciasData = datos.filter(d => esEmergencia(d));
-
-    // Filtramos Reembolsos (estos suelen estar bien)
     const reembolsosData = datos.filter(d => d.tipo_solicitud === 'reembolso');
-
-    // Filtramos Consultas:
-    // Son las que dicen 'consulta' PERO NO son ECOR Y NO son Emergencia
     const consultasData = datos.filter(d => 
         d.tipo_solicitud === 'consulta' && 
         !esEcor(d) && 
@@ -108,8 +90,9 @@ async function createExcelReport(datos, fechaString) {
     emergenciasSheet.columns = [
         { header: 'Fecha Registro', key: 'fecha_solicitud', width: 15 },
         { header: 'Hora Registro', key: 'hora_solicitud', width: 15 },
-        { header: 'Detalle', key: 'tipo_consulta_detalle', width: 30 }, 
-        { header: 'Turno ID', key: 'numero_turno', width: 15 },
+        // Aquí mostraremos lo que escribió el usuario (guardado en tipo_consulta_detalle)
+        { header: 'Motivo / Detalle', key: 'tipo_consulta_detalle', width: 50 }, 
+        { header: 'ID Sistema', key: 'numero_turno', width: 15 },
     ];
     emergenciasSheet.addRows(emergenciasData);
 
@@ -119,7 +102,7 @@ async function createExcelReport(datos, fechaString) {
 }
 
 // ---------------------------------------------------------
-// FUNCIONES DE ENVÍO (Resend + WhatsApp)
+// FUNCIONES DE ENVÍO
 // ---------------------------------------------------------
 
 async function sendEmailWithAttachment(filePath, asunto) {
